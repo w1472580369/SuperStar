@@ -22,7 +22,7 @@ from api.logger import logger
 # 关闭警告
 disable_warnings(exceptions.InsecureRequestWarning)
 
-__all__ = ["CacheDAO", "Tiku", "TikuFallback", "TikuYanxi", "TikuGo", "TikuLike", "TikuAdapter", "AI", "SiliconFlow"]
+__all__ = ["CacheDAO", "Tiku", "TikuFallback", "TikuYanxi", "TikuGo", "TikuLike", "TikuAdapter", "TikuXxtmooc", "AI", "SiliconFlow"]
 
 class CacheDAO:
     """
@@ -1001,6 +1001,83 @@ class TikuAdapter(Tiku):
         # self.load_token()
         self.api = self._conf['url']
 
+
+class TikuXxtmooc(Tiku):
+    # SuperAutoStudy(Supers) 同款聚合题库实现, 参考 https://github.com/Dainoar/SuperAutoStudy
+    # 上游服务: https://github.com/DuanInnovator/SuperTiKu  (http://tk.xxtmooc.com/api/q)
+    def __init__(self) -> None:
+        super().__init__()
+        self.name = 'SuperTiKu聚合题库'
+        self.api = 'http://tk.xxtmooc.com/api/q'
+        self._timeout = 15
+        self._retry_times = 2
+        self._retry_backoff = 1.5
+        self._lookup = {
+            'single': 0,
+            'multiple': 1,
+            'completion': 2,
+            'judgement': 3,
+        }
+
+    def _query(self, q_info: dict):
+        # 题目类型映射与 SuperAutoStudy 的 QuestionTypeConstant 保持一致
+        q_type = self._lookup.get(q_info['type'], 4)
+        options = [o.strip() for o in q_info['options'].split('\n') if o.strip()]
+
+        for attempt in range(1, self._retry_times + 1):
+            try:
+                res = requests.post(
+                    self.api,
+                    json={
+                        'question': q_info['title'],
+                        'options': options,
+                        'type': q_type,
+                    },
+                    verify=False,
+                    timeout=self._timeout,
+                )
+            except requests.exceptions.RequestException as e:
+                logger.error(f'{self.name}查询异常 ({attempt}/{self._retry_times}): {e}')
+                if attempt < self._retry_times:
+                    time.sleep(self._retry_backoff * attempt)
+                continue
+
+            return self._parse_response(res)
+
+        return None
+
+    def _parse_response(self, res: requests.Response) -> Optional[str]:
+        if res.status_code != 200:
+            logger.error(f'{self.name}查询失败: 状态码 {res.status_code}, 响应: {res.text}')
+            return None
+
+        try:
+            res_json = res.json()
+        except ValueError:
+            logger.error(f'{self.name}查询失败: 返回内容不是有效JSON, 响应: {res.text}')
+            return None
+
+        code = res_json.get('code')
+        if code != 200:
+            logger.info(f"{self.name}未命中或失败: {res_json.get('msg') or '未知错误'} (code={code})")
+            return None
+
+        answer = str(res_json.get('data', '')).strip()
+        if not answer:
+            return None
+        return answer
+
+    def _init_tiku(self):
+        self.api = self._conf.get('xxtmooc_url', self.api)
+        try:
+            timeout = float(self._conf.get('xxtmooc_timeout', self._timeout))
+            if timeout <= 0:
+                raise ValueError('xxtmooc_timeout must be positive')
+            self._timeout = timeout
+        except (TypeError, ValueError):
+            logger.warning(f'{self.name}配置 xxtmooc_timeout 无效，使用默认值 {self._timeout}')
+
+
 class AI(Tiku):
     # AI大模型答题实现
     def __init__(self) -> None:
@@ -1320,6 +1397,7 @@ PROVIDER_REGISTRY = {
     'TikuGo': TikuGo,
     'TikuLike': TikuLike,
     'TikuAdapter': TikuAdapter,
+    'TikuXxtmooc': TikuXxtmooc,
     'AI': AI,
     'SiliconFlow': SiliconFlow,
 }
