@@ -404,8 +404,12 @@ class TikuYanxi(Tiku):
         self._token = None
         self._token_index = 0   # token队列计数器
         self._times = 100   # 查询次数剩余, 初始化为100, 查询后校对修正
+        self._token_lock = threading.Lock()   # 并发下保护 token_index 的原子更换
+        self._token_exhausted = False   # 标记所有token已用完
 
     def _query(self,q_info:dict):
+        if self._token_exhausted or self.DISABLE:
+            return None
         res = requests.get(
             self.api,
             params={
@@ -422,8 +426,8 @@ class TikuYanxi(Tiku):
                 # 如果是因为TOKEN次数到期, 则更换token
                 if self._times == 0 or '次数不足' in res_json['data']['answer']:
                     logger.info(f'TOKEN查询次数不足, 将会更换并重新搜题')
-                    self._token_index += 1
-                    self.load_token()
+                    if not self._advance_token():
+                        return None
                     # 重新查询
                     return self._query(q_info)
                 logger.error(f'{self.name}查询失败:\n\t剩余查询数{res_json["data"].get("times",f"{self._times}(仅参考)")}:\n\t消息:{res_json["message"]}')
@@ -434,12 +438,28 @@ class TikuYanxi(Tiku):
             logger.error(f'{self.name}查询失败:\n{res.text}')
         return None
 
+    def _advance_token(self) -> bool:
+        """原子地更换到下一个token, 全部用完后返回 False 并停用该题库"""
+        with self._token_lock:
+            token_list = self._conf['tokens'].split(',')
+            if self._token_index >= len(token_list) - 1:
+                # TOKEN 用完
+                logger.error('言溪题库 TOKEN 已用完, 请自行更换')
+                self._token_exhausted = True
+                self.DISABLE = True
+                return False
+            self._token_index += 1
+            self._token = token_list[self._token_index]
+            return True
+
     def load_token(self):
         token_list = self._conf['tokens'].split(',')
-        if self._token_index == len(token_list):
+        if self._token_index >= len(token_list):
             # TOKEN 用完
             logger.error('TOKEN用完, 请自行更换再重启脚本')
-            raise PermissionError(f'{self.name} TOKEN 已用完, 请更换')
+            self._token_exhausted = True
+            self.DISABLE = True
+            return
         self._token = token_list[self._token_index]
 
     def _init_tiku(self):
