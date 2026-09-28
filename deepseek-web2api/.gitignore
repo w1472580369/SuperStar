@@ -1,0 +1,22 @@
+.env
+__pycache__/
+*.pyc
+server_test.log
+venv/
+.venv/
+data/accounts.json
+data/accounts.ci.json
+
+# v3 React webui build artefacts (commit source, not built files)
+webui-new/node_modules/
+webui-new/dist/
+webui-new/.vite/
+
+# Local IDE / OS noise
+.DS_Store
+.idea/
+.vscode/
+
+# Test artefacts
+.pytest_cache/
+*.egg-info/
