@@ -146,6 +146,7 @@ class Tiku:
         self._name = None
         self._api = None
         self._conf = None
+        self.config_path = None
 
     @property
     def name(self):
@@ -174,16 +175,19 @@ class Tiku:
     def init_tiku(self):
         # 仅用于题库初始化, 应该在题库载入后作初始化调用, 随后才可以使用题库
         # 尝试根据配置文件设置提交模式
+        if self.DISABLE:
+            return
         if not self._conf:
             self.config_set(self._get_conf())
-        if not self.DISABLE:
-            # 设置提交模式
-            self.SUBMIT = True if self._conf['submit'] == 'true' else False
-            self.COVER_RATE = float(self._conf['cover_rate'])
-            self.true_list = self._conf['true_list'].split(',')
-            self.false_list = self._conf['false_list'].split(',')
-            # 调用自定义题库初始化
-            self._init_tiku()
+        if self.DISABLE or not self._conf:
+            return
+        # 设置提交模式
+        self.SUBMIT = True if self._conf['submit'] == 'true' else False
+        self.COVER_RATE = float(self._conf['cover_rate'])
+        self.true_list = self._conf['true_list'].split(',')
+        self.false_list = self._conf['false_list'].split(',')
+        # 调用自定义题库初始化
+        self._init_tiku()
 
     def _init_tiku(self):
         # 仅用于题库初始化, 例如配置token, 交由自定义题库完成
@@ -192,13 +196,16 @@ class Tiku:
     def config_set(self,config):
         self._conf = config
 
+    def set_config_path(self, path):
+        self.config_path = path
+
     def _get_conf(self):
         """
         从默认配置文件查询配置, 如果未能查到, 停用题库
         """
         try:
             config = configparser.ConfigParser()
-            config.read(self.CONFIG_PATH, encoding="utf8")
+            config.read(self.config_path or self.CONFIG_PATH, encoding="utf8")
             return config['tiku']
         except (KeyError, FileNotFoundError):
             logger.info("未找到tiku配置, 已忽略题库功能")
@@ -249,10 +256,10 @@ class Tiku:
         """
         从配置文件加载题库, 这个配置可以是用户提供, 可以是默认配置文件
         """
-        if not self._conf:
+        if not self._conf and not self.DISABLE:
             # 尝试从默认配置文件加载
             self.config_set(self._get_conf())
-        if self.DISABLE:
+        if self.DISABLE or not self._conf:
             return self
         try:
             cls_name = self._conf['provider']

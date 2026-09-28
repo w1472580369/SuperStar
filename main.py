@@ -164,13 +164,14 @@ def init_config():
         common_config, tiku_config, notification_config = load_config_from_file(args.config)
         if args.verbose:
             common_config["verbose"] = True
-        return common_config, tiku_config, notification_config
+        return common_config, tiku_config, notification_config, args.config
     else:
-        return build_config_from_args(args)
+        common_config, tiku_config, notification_config = build_config_from_args(args)
+        return common_config, tiku_config, notification_config, None
 
 
 
-def init_chaoxing(common_config, tiku_config):
+def init_chaoxing(common_config, tiku_config, config_path=None):
     """初始化超星实例"""
     username = common_config.get("username", "")
     password = common_config.get("password", "")
@@ -186,6 +187,8 @@ def init_chaoxing(common_config, tiku_config):
     # 设置题库
     tiku = Tiku()
     tiku.config_set(tiku_config)  # 载入配置
+    if config_path:
+        tiku.set_config_path(config_path)  # 让 -c 指定的配置文件对题库生效
     tiku = tiku.get_tiku_from_config()  # 载入题库
     tiku.init_tiku()  # 初始化题库
     
@@ -533,7 +536,7 @@ def main():
     """主程序入口"""
     try:
         # 初始化配置
-        common_config, tiku_config, notification_config = init_config()
+        common_config, tiku_config, notification_config, config_path = init_config()
         configure_console_logger("DEBUG" if common_config.get("verbose", False) else "INFO")
         
         # 强制播放按照配置文件调节
@@ -541,7 +544,7 @@ def main():
         common_config["notopen_action"] = common_config.get("notopen_action", "retry")
         
         # 初始化超星实例
-        chaoxing = init_chaoxing(common_config, tiku_config)
+        chaoxing = init_chaoxing(common_config, tiku_config, config_path)
         
         # 设置外部通知
         notification = Notification()
