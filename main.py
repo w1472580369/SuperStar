@@ -195,16 +195,22 @@ def init_chaoxing(common_config, tiku_config, config_path=None):
     # 获取查询延迟设置
     
     # 检查大模型连接（如果使用的是大模型题库）
-    # 根据配置文件中的 provider 判断是否为大模型题库
-    provider = tiku_config.get('provider', '')
+    # 使用实际加载后的题库配置判断, 兼容仅 CLI 参数(无 -c)时读取 config.ini 的情况
+    loaded_config = tiku._conf or {}
+    provider = loaded_config.get('provider', '')
     provider_list = [name.strip() for name in provider.split(',') if name.strip()]
     if any(name in ['AI', 'SiliconFlow'] for name in provider_list):
-        check_connection = tiku_config.get('check_llm_connection', 'true').lower() == 'true'
+        check_connection = loaded_config.get('check_llm_connection', 'true').lower() == 'true'
         if check_connection:
             logger.info(f'正在验证大模型配置 (provider={provider})...')
             if not tiku.check_llm_connection():
                 logger.error('大模型连接检查失败')
-                choice = input('大模型连接检查失败，无法准确答题，是否继续运行？(Y/n): ').strip().lower()
+                choice = ''
+                # CI/无交互环境下不阻塞, 直接默认继续(与直接回车一致)
+                if sys.stdin.isatty():
+                    choice = input('大模型连接检查失败，无法准确答题，是否继续运行？(Y/n): ').strip().lower()
+                else:
+                    logger.warning('非交互环境, 默认继续运行')
                 # 直接回车默认继续运行
                 if choice not in ('', 'y', 'yes'):
                     raise RuntimeError('用户取消运行')
