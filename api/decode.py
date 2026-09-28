@@ -108,6 +108,63 @@ def decode_course_point(html_text: str) -> Dict[str, Any]:
     return course_point
 
 
+def _element_text(element) -> str:
+    """安全提取元素文本, 元素不存在时返回空字符串。"""
+    if element is None:
+        return ""
+    return element.get_text(strip=True)
+
+
+def _element_classes(element) -> str:
+    """拼接元素的所有 class, 便于按关键字匹配图标状态。"""
+    if element is None:
+        return ""
+    classes = element.get("class") or []
+    return " ".join(str(cls) for cls in classes)
+
+
+def _detect_completed_icon(point) -> bool:
+    """
+    通过任务点下的状态图标判断是否已完成。
+
+    超星新版网页会用 icon_Completed / icon_NotCompleted 这类元素表示章节状态,
+    这些图标可能只带样式而不含文字, 因此不能只看 bntHoverTips 的文本。
+    """
+    for icon in point.find_all(["em", "i", "span"]):
+        classes = _element_classes(icon)
+        if any(key in classes for key in ("NotCompleted", "Uncompleted", "Lock")):
+            return False
+        if "Completed" in classes:
+            return True
+    return False
+
+
+def _is_point_finished(point) -> bool:
+    """
+    判断章节任务点是否已全部完成。
+
+    优先依据提示文案: 只要出现“未完成”就一定视为未完成, 避免新版页面同时
+    渲染“已完成/未完成”两段文案时把未完成的章节误判为已看完; 其次回退到图标判断。
+    """
+    tips_text = _element_text(point.select_one("span.bntHoverTips"))
+    if "未完成" in tips_text:
+        return False
+    if "已完成" in tips_text:
+        return True
+    return _detect_completed_icon(point)
+
+
+def _is_point_locked(point) -> bool:
+    """判断章节是否需要解锁, 兼容文本提示与锁定图标两种形式。"""
+    tips_text = _element_text(point.select_one("span.bntHoverTips"))
+    if "解锁" in tips_text:
+        return True
+    for icon in point.find_all(["em", "i", "span"]):
+        if "Lock" in _element_classes(icon):
+            return True
+    return False
+
+
 def _extract_points_from_chapter(chapter_unit) -> List[Dict[str, Any]]:
     """
     从章节单元中提取章节点信息
@@ -134,13 +191,11 @@ def _extract_points_from_chapter(chapter_unit) -> List[Dict[str, Any]]:
         need_unlock = False
         if point.select_one("input.knowledgeJobCount"):
             job_count = point.select_one("input.knowledgeJobCount").attrs["value"]
-        elif point.select_one("span.bntHoverTips") and "解锁" in point.select_one("span.bntHoverTips").text:
+        elif _is_point_locked(point):
             need_unlock = True
             
         # 判断是否已完成
-        is_finished = False
-        if point.select_one("span.bntHoverTips") and "已完成" in point.select_one("span.bntHoverTips").text:
-            is_finished = True
+        is_finished = _is_point_finished(point)
             
         point_detail = {
             "id": point_id,

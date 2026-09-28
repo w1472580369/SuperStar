@@ -449,6 +449,20 @@ def process_course(chaoxing: Chaoxing, course:dict[str, Any], config: dict):
     point_list = chaoxing.get_course_point(
         course["courseId"], course["clazzId"], course["cpi"]
     )
+    points = point_list["points"]
+
+    # 识别已经全部看完的课程, 直接跳过, 从尚未看完的课程继续
+    unfinished_points = [point for point in points if not point.get("has_finished")]
+    if not unfinished_points:
+        logger.info(f"课程: {course['title']} 所有章节均已看完, 跳过该课程")
+        return
+
+    finished_num = len(points) - len(unfinished_points)
+    if finished_num:
+        logger.info(
+            f"课程: {course['title']} 已识别 {finished_num}/{len(points)} 个章节已看完, "
+            f"将从第一个未看完章节: {unfinished_points[0]['title']} 开始"
+        )
 
     # 为了支持课程任务回滚, 采用下标方式遍历任务点
 
@@ -458,7 +472,10 @@ def process_course(chaoxing: Chaoxing, course:dict[str, Any], config: dict):
 
     tasks=[]
 
-    for i, point in enumerate(point_list["points"]):
+    for i, point in enumerate(points):
+        if point.get("has_finished"):
+            logger.info(f'章节：{point["title"]} 已完成所有任务点, 跳过')
+            continue
         task = ChapterTask(point=point, index=i)
         tasks.append(task)
     p = JobProcessor(chaoxing, course, tasks, config)
