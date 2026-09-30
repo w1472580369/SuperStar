@@ -290,6 +290,7 @@ class Tiku:
                 return self
             new_cls = provider_cls()
             new_cls.config_set(self._conf)
+            new_cls.set_config_path(self.config_path)
             return new_cls
 
         chain_providers = []
@@ -301,6 +302,7 @@ class Tiku:
                 return self
             provider = provider_cls()
             provider.config_set(self._conf)
+            provider.set_config_path(self.config_path)
             chain_providers.append(provider)
         fallback = TikuFallback(chain_providers)
         fallback.config_set(self._conf)
@@ -1080,6 +1082,7 @@ class TikuXxtmooc(Tiku):
 
 class AI(Tiku):
     # AI大模型答题实现
+    CONF_SECTION = 'ai'
     def __init__(self) -> None:
         super().__init__()
         self.name = 'AI大模型答题'
@@ -1204,12 +1207,30 @@ class AI(Tiku):
             logger.error("无法解析大模型输出内容")
             return None
 
+    def _get_ai_conf(self) -> dict:
+        """读取独立配置节 [ai]，不存在时返回空字典"""
+        try:
+            config = configparser.ConfigParser()
+            config.read(self.config_path or self.CONFIG_PATH, encoding="utf8")
+            return dict(config[self.CONF_SECTION])
+        except (KeyError, FileNotFoundError):
+            return {}
+
     def _init_tiku(self):
-        self.endpoint = self._conf['endpoint']
-        self.key = self._conf['key']
-        self.model = self._conf['model']
-        self.http_proxy = self._conf['http_proxy']
-        self.min_interval_seconds = int(self._conf['min_interval_seconds'])
+        # AI答题参数优先取独立 [ai] 节，缺失时回退到 [tiku] 以兼容旧配置
+        ai_conf = self._get_ai_conf()
+        base = self._conf or {}
+
+        def _pick(key, default=None):
+            if key in ai_conf:
+                return ai_conf[key]
+            return base.get(key, default)
+
+        self.endpoint = _pick('endpoint')
+        self.key = _pick('key')
+        self.model = _pick('model')
+        self.http_proxy = _pick('http_proxy')
+        self.min_interval_seconds = int(_pick('min_interval_seconds', 0) or 0)
 
     def check_llm_connection(self) -> bool:
         """
@@ -1248,6 +1269,19 @@ class AI(Tiku):
         except Exception as e:
             logger.error(f'{self.name} 连接检查失败：{e}')
             return False
+
+
+class DeepSeekWeb2API(AI):
+    """本地 deepseek-web2api 代理答题实现
+
+    与 AI 答题逻辑一致，仅连接的配置节不同(独立 [deepseek_web2api] 节)，
+    便于与通用 AI 题库同时启用，并通过 provider 参数分别控制使用。
+    """
+    CONF_SECTION = 'deepseek_web2api'
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.name = 'deepseek-web2api代理'
 
 
 class SiliconFlow(Tiku):
@@ -1399,5 +1433,6 @@ PROVIDER_REGISTRY = {
     'TikuAdapter': TikuAdapter,
     'TikuXxtmooc': TikuXxtmooc,
     'AI': AI,
+    'DeepSeekWeb2API': DeepSeekWeb2API,
     'SiliconFlow': SiliconFlow,
 }

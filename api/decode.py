@@ -577,3 +577,168 @@ def _extract_choices(element, font_decoder=None) -> str:
         cleaned_content = cleaned_content[:-2].rstrip()
 
     return cleaned_content
+
+
+def decode_homework_form(html_content: str) -> Dict[str, Any]:
+    """
+    解析独立课程作业(作业中心)的答题页, 提取提交所需表单数据与题目列表
+
+    与章节检测(decode_questions_info)不同, 作业中心答题页结构差异较大:
+    - 题目节点: div.singleQuesId 的 data 属性即题目id
+    - 标题: h3.mark_name(含题型提示span需清理)
+    - 选项: div.answerBg, span[data]为选项值, div.answer_p>p为选项文本
+    - 填空/简答: textarea#answer{id}
+    - 提交: form action 指向 /mooc-ans/work/addStudentWorkNewWeb
+      (query含 classId/courseid/token/totalQuestionNum/wMicroNodeId)
+    - hidden input: standardEnc/enc_work/totalQuestionNum/workRelationId/workAnswerId/mooc2/randomOptions/workTimesEnc
+
+    Returns:
+        包含表单数据与题目列表的字典, 供 homework 模块提交使用
+    """
+    soup = BeautifulSoup(html_content, "lxml")
+
+    form_tag = soup.find("form", id="submitForm") or soup.find("form")
+    form_data = {}
+
+    if form_tag:
+        # 从 form action 提取参数(_classId/courseid/token/totalQuestionNum/wMicroNodeId)
+        action = form_tag.attrs.get("action", "")
+        m = re.search(r"addStudentWorkNewWeb\?", action)
+        if m:
+            query = action[m.end():]
+            for k, v in re.findall(r"([^=&?]+)=([^&]*)", query):
+                form_data.setdefault(k, v)
+
+        # 提取表单内所有 hidden input
+        for input_tag in form_tag.find_all("input", {"type": "hidden"}):
+            name = input_tag.attrs.get("name") or input_tag.attrs.get("id")
+            if name:
+                form_data.setdefault(name, input_tag.attrs.get("value", ""))
+
+    # 与章节检测一致, 从页面级 hidden input 兜底补充(部分字段可能不在form内)
+    for key in ("standardEnc", "enc_work", "totalQuestionNum", "workRelationId", "workAnswerId", "mooc2", "randomOptions", "workTimesEnc"):
+        if key not in form_data:
+            tag = soup.find("input", {"name": key}) or soup.find("input", {"id": key})
+            if tag:
+                form_data[key] = tag.attrs.get("value", "")
+
+    has_font_encryption = bool(soup.find("style", id="cxSecretStyle"))
+    font_decoder = FontDecoder(html_content) if has_font_encryption else None
+    if not has_font_encryption:
+        logger.warning("未找到字体文件，可能是未加密的题目不进行解密")
+
+    questions = []
+    for div_tag in soup.find_all("div", class_="singleQuesId"):
+        question = _process_homework_question(div_tag, font_decoder)
+        if question:
+            questions.append(question)
+
+    form_data["questions"] = questions
+    form_data["answerwqbid"] = ",".join([q["id"] for q in questions]) + ","
+
+    return form_data
+
+
+def _process_homework_question(div_tag, font_decoder=None) -> Dict[str, Any]:
+    """处理单个作业题目"""
+    question_id = div_tag.attrs.get("data", "")
+
+    # 题型码: answertype{id} hidden input
+    q_type_code = ""
+    type_input = div_tag.find("input", attrs={"name": f"answertype{question_id}"})
+    if type_input is not None:
+        q_type_code = type_input.attrs.get("value", "")
+    # 兜底: 从 typeName 属性映射
+    if not q_type_code:
+        type_name = div_tag.attrs.get("typeName", "")
+        q_type_code = _homework_type_name_to_code(type_name)
+
+    q_type = _get_question_type(q_type_code)
+
+    # 题目标题 h3.mark_name(清理数字序号与题型提示)
+    title_div = div_tag.find("h3", class_="mark_name")
+    q_title = _extract_homework_title(title_div, font_decoder)
+
+    # 选项: div.answerBg, span[data]为值, div.answer_p>p为文本
+    options_list = []
+    answer_map = {}
+    for answer_div in div_tag.find_all("div", class_="answerBg"):
+        opt_value = ""
+        opt_span = answer_div.find("span", attrs={"data": True})
+        if opt_span is not None:
+            opt_value = opt_span.attrs.get("data", "")
+        if not opt_value:
+            continue
+        opt_text_p = answer_div.find("div", class_="answer_p")
+        opt_text = ""
+        if opt_text_p is not None:
+            p = opt_text_p.find("p")
+            if p is not None:
+                opt_text = p.get_text()
+        if font_decoder:
+            opt_text = font_decoder.decode(opt_text)
+        opt_text = opt_text.strip()
+        line = f"{opt_value} {opt_text}" if opt_text else opt_value
+        options_list.append(line)
+        answer_map[opt_value] = opt_text
+
+    options_str = "\n".join(options_list)
+
+    # 已填答案(仅用于参考/判断是否已做, 交由 homework 模块处理)
+    existing_answer = ""
+    answer_input = div_tag.find("input", attrs={"name": f"answer{question_id}"})
+    if answer_input is not None:
+        existing_answer = answer_input.attrs.get("value", "")
+
+    return {
+        "id": question_id,
+        "title": q_title,
+        "options": options_str,
+        "type": q_type,
+        "type_code": q_type_code,
+        "existing_answer": existing_answer,
+        "answer_map": answer_map,
+        "answerField": {
+            f"answer{question_id}": "",
+            f"answertype{question_id}": q_type_code,
+        },
+    }
+
+
+def _homework_type_name_to_code(type_name: str) -> str:
+    """将作业页 typeName 属性映射为题型码"""
+    type_map = {
+        "单选题": "0",
+        "多选题": "1",
+        "填空题": "2",
+        "判断题": "3",
+        "简答题": "4",
+    }
+    return type_map.get(type_name, "")
+
+
+def _extract_homework_title(element, font_decoder=None) -> str:
+    """提取作业题目标题, 清理数字序号与(题型)提示"""
+    if not element:
+        return ""
+
+    content = []
+    for item in element.descendants:
+        if isinstance(item, NavigableString):
+            content.append(item.string or "")
+        elif item.name == "img":
+            img_url = item.get("src", "")
+            content.append(f'<img src="{img_url}">')
+
+    raw_content = "".join(content)
+    raw_content = raw_content.replace("\r", "").replace("\t", "").replace("\n", "")
+
+    # 清理开头数字序号, 如 "1. " / "267. "
+    raw_content = re.sub(r'^\s*\d+\s*[\.、．]?\s*', '', raw_content)
+    # 清理题型提示 (单选题) 等
+    raw_content = re.sub(r'\(\s*[^)]*(?:题|填空)[^)]*\)', '', raw_content)
+
+    if font_decoder:
+        raw_content = font_decoder.decode(raw_content)
+
+    return raw_content.strip()

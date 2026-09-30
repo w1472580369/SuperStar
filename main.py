@@ -17,6 +17,14 @@ from tqdm import tqdm
 from api.answer import Tiku
 from api.base import Chaoxing, Account, StudyResult
 from api.exceptions import LoginError, InputFormatError
+from api.homework import (
+    HomeworkError,
+    get_homework_detail,
+    get_homework_list,
+    solve_homework,
+    submit_homework,
+)
+from api.homework_pdf import generate_homework_pdf
 from api.logger import configure_console_logger, logger
 from api.notification import Notification
 from api.live import Live
@@ -86,6 +94,25 @@ def parse_args():
 
     parser.add_argument("--auto-sign", action="store_true", help="自动签到")
 
+    # 独立作业答题(作业中心)
+    parser.add_argument(
+        "--homework", action="store_true",
+        help="启用作业答题(独立课程作业, 非章节检测)",
+    )
+    parser.add_argument(
+        "--homework-submit", type=str, default=None,
+        choices=["true", "false"],
+        help="作业是否提交: true=提交(pyFlag空), false=仅保存(pyFlag=1)。默认读 config.ini 的 homework.submit",
+    )
+    parser.add_argument(
+        "--homework-cover-rate", type=float, default=None,
+        help="作业最低搜题覆盖率, 达到才提交, 否则仅保存。默认读 config.ini 的 homework.cover_rate",
+    )
+    parser.add_argument(
+        "--homework-only", action="store_true",
+        help="仅运行作业答题, 不学习章节任务点",
+    )
+
     # 在解析之前捕获 -h 的行为
     if len(sys.argv) == 2 and sys.argv[1] in {"-h", "--help"}:
         parser.print_help()
@@ -102,6 +129,7 @@ def load_config_from_file(config_path):
     common_config: dict[str, Any] = {}
     tiku_config: dict[str, Any] = {}
     notification_config: dict[str, Any] = {}
+    homework_config: dict[str, Any] = {}
     
     # 检查并读取common节
     if config.has_section("common"):
@@ -134,11 +162,25 @@ def load_config_from_file(config_path):
             if key in tiku_config:
                 tiku_config[key] = float(tiku_config[key])
 
+    # 检查并读取homework节(独立作业答题)
+    if config.has_section("homework"):
+        homework_config = dict(config.items("homework"))
+        if "enable" in homework_config:
+            homework_config["enable"] = str_to_bool(homework_config["enable"])
+        if "pdf" in homework_config:
+            homework_config["pdf"] = str_to_bool(homework_config["pdf"])
+        if "submit" in homework_config:
+            homework_config["submit"] = str_to_bool(homework_config["submit"])
+        if "cover_rate" in homework_config:
+            homework_config["cover_rate"] = float(homework_config["cover_rate"])
+        if "delay" in homework_config:
+            homework_config["delay"] = float(homework_config["delay"])
+
     # 检查并读取notification节
     if config.has_section("notification"):
         notification_config = dict(config.items("notification"))
     
-    return common_config, tiku_config, notification_config
+    return common_config, tiku_config, notification_config, homework_config
 
 
 def build_config_from_args(args):
@@ -153,7 +195,7 @@ def build_config_from_args(args):
         "notopen_action": args.notopen_action if args.notopen_action else "retry",
         "verbose": args.verbose,
     }
-    return common_config, {}, {}
+    return common_config, {}, {}, {}
 
 
 def init_config():
@@ -161,13 +203,51 @@ def init_config():
     args = parse_args()
 
     if args.config:
-        common_config, tiku_config, notification_config = load_config_from_file(args.config)
+        common_config, tiku_config, notification_config, homework_config = load_config_from_file(args.config)
         if args.verbose:
             common_config["verbose"] = True
-        return common_config, tiku_config, notification_config, args.config
+        # CLI 参数覆盖配置
+        if args.homework:
+            homework_config["enable"] = True
+        if args.homework_submit is not None:
+            homework_config["submit"] = args.homework_submit == "true"
+        if args.homework_cover_rate is not None:
+            homework_config["cover_rate"] = args.homework_cover_rate
+        if args.homework_only:
+            homework_config["enable"] = True
+            homework_config["only"] = True
+        return common_config, tiku_config, notification_config, homework_config, args
     else:
-        common_config, tiku_config, notification_config = build_config_from_args(args)
-        return common_config, tiku_config, notification_config, None
+        common_config, tiku_config, notification_config, homework_config = build_config_from_args(args)
+        # 无 -c 时尝试从默认配置文件(工作目录 config.ini)读取 homework 节, 与题库行为一致
+        try:
+            _parser = configparser.ConfigParser()
+            if _parser.read("config.ini", encoding="utf8") and _parser.has_section("homework"):
+                _cfg = dict(_parser.items("homework"))
+                if "enable" in _cfg:
+                    _cfg["enable"] = str_to_bool(_cfg["enable"])
+                if "pdf" in _cfg:
+                    _cfg["pdf"] = str_to_bool(_cfg["pdf"])
+                if "submit" in _cfg:
+                    _cfg["submit"] = str_to_bool(_cfg["submit"])
+                if "cover_rate" in _cfg:
+                    _cfg["cover_rate"] = float(_cfg["cover_rate"])
+                if "delay" in _cfg:
+                    _cfg["delay"] = float(_cfg["delay"])
+                homework_config.update(_cfg)
+        except Exception:
+            pass
+        # CLI 参数覆盖配置
+        if args.homework:
+            homework_config["enable"] = True
+        if args.homework_submit is not None:
+            homework_config["submit"] = args.homework_submit == "true"
+        if args.homework_cover_rate is not None:
+            homework_config["cover_rate"] = args.homework_cover_rate
+        if args.homework_only:
+            homework_config["enable"] = True
+            homework_config["only"] = True
+        return common_config, tiku_config, notification_config, homework_config, args
 
 
 
@@ -199,7 +279,7 @@ def init_chaoxing(common_config, tiku_config, config_path=None):
     loaded_config = tiku._conf or {}
     provider = loaded_config.get('provider', '')
     provider_list = [name.strip() for name in provider.split(',') if name.strip()]
-    if any(name in ['AI', 'SiliconFlow'] for name in provider_list):
+    if any(name in ['AI', 'DeepSeekWeb2API', 'SiliconFlow'] for name in provider_list):
         check_connection = loaded_config.get('check_llm_connection', 'true').lower() == 'true'
         if check_connection:
             logger.info(f'正在验证大模型配置 (provider={provider})...')
@@ -539,11 +619,97 @@ def format_time(num, suffix='', divisor=''):
     return f"{mins:02d}:{sec:02d}"
 
 
+def process_homework(chaoxing: Chaoxing, course: dict[str, Any], homework_config: dict[str, Any]) -> StudyResult:
+    """处理单个课程的独立作业答题"""
+    logger.info(f"开始处理课程作业: {course['title']}")
+
+    should_submit = homework_config.get("submit", False)
+    cover_rate_threshold = homework_config.get("cover_rate", 0.0)
+    query_delay = homework_config.get("delay", 0.0)
+    export_pdf = homework_config.get("pdf", False)
+
+    try:
+        works = get_homework_list(course, status=1)  # 1=未完成
+    except HomeworkError as e:
+        logger.error(f"获取作业列表失败: {e}")
+        return StudyResult.ERROR
+
+    if not works:
+        logger.info(f"课程: {course['title']} 无未完成作业, 跳过")
+        return StudyResult.SUCCESS
+
+    logger.info(f"课程: {course['title']} 发现 {len(works)} 个未完成作业:")
+    for w in works:
+        logger.info(f"  - 作业 workId={w.get('workId')} answerId={w.get('answerId')}")
+
+    for work in works:
+        try:
+            _process_single_homework(chaoxing, course, work, {
+                "submit": should_submit,
+                "cover_rate": cover_rate_threshold,
+                "delay": query_delay,
+                "pdf": export_pdf,
+            })
+        except Exception as e:
+            logger.error(f"作业处理失败: {e}")
+            logger.error(traceback.format_exc())
+
+    return StudyResult.SUCCESS
+
+
+def _process_single_homework(chaoxing, course, work, homework_config):
+    """处理单个作业: 详情->搜题->保存/提交"""
+    # 获取作业详情(题目页)
+    form = get_homework_detail(work)
+
+    if not form.get("questions"):
+        logger.warning(f"作业 workId={work.get('workId')} 无题目, 跳过")
+        return
+
+    # 已存在答案的题目(如之前保存过)保留原答案, 仅补空题
+    questions = form.get("questions", [])
+    total = len(questions)
+    logger.info(f"作业 workId={work.get('workId')} 共 {total} 题")
+
+    found_answers, total_questions = solve_homework(
+        chaoxing.tiku,
+        form,
+        query_delay=homework_config.get("delay", 0.0),
+    )
+
+    cover_rate = (found_answers / total_questions * 100) if total_questions else 0.0
+    logger.info(f"作业搜题覆盖率: {cover_rate:.0f}%  ({found_answers}/{total_questions})")
+
+    threshold = homework_config.get("cover_rate", 100.0)
+    should_submit = homework_config.get("submit", False)
+
+    if should_submit and cover_rate >= threshold:
+        _do_submit = True
+        _action = "提交"
+    elif should_submit:
+        _do_submit = False
+        _action = "覆盖率未达要求, 仅保存"
+    else:
+        _do_submit = False
+        _action = "配置为仅保存, 不提交"
+
+    logger.info(f"作业 workId={work.get('workId')}: {_action}")
+    result = submit_homework(course, work, form, submit=_do_submit)
+    if result.is_failure():
+        logger.error(f"作业 workId={work.get('workId')} 保存/提交失败")
+
+    if homework_config.get("pdf", False):
+        try:
+            generate_homework_pdf(course, work, form)
+        except Exception as e:
+            logger.error(f"作业 PDF 导出失败 workId={work.get('workId')}: {e}")
+
+
 def main():
     """主程序入口"""
     try:
         # 初始化配置
-        common_config, tiku_config, notification_config, config_path = init_config()
+        common_config, tiku_config, notification_config, homework_config, args = init_config()
         configure_console_logger("DEBUG" if common_config.get("verbose", False) else "INFO")
         
         # 强制播放按照配置文件调节
@@ -551,6 +717,7 @@ def main():
         common_config["notopen_action"] = common_config.get("notopen_action", "retry")
         
         # 初始化超星实例
+        config_path = args.config if args.config else None
         chaoxing = init_chaoxing(common_config, tiku_config, config_path)
         
         # 设置外部通知
@@ -572,8 +739,19 @@ def main():
         
         # 开始学习
         logger.info(f"课程列表过滤完毕, 当前课程任务数量: {len(course_task)}")
-        for course in course_task:
-            process_course(chaoxing, course, common_config)
+        if args.homework_only:
+            # 仅作业答题
+            for course in course_task:
+                process_homework(chaoxing, course, homework_config)
+        else:
+            # 刷课模块: 学习章节任务点
+            for course in course_task:
+                process_course(chaoxing, course, common_config)
+            # 刷课模块完成后, 按配置运行作业答题(enable=1 时)
+            if homework_config.get("enable", False):
+                logger.info("刷课模块已完成, 开始处理作业答题")
+                for course in course_task:
+                    process_homework(chaoxing, course, homework_config)
         
         logger.info("所有课程学习任务已完成")
         notification.send("chaoxing : 所有课程学习任务已完成")

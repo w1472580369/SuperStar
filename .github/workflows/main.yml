@@ -28,15 +28,9 @@ jobs:
         env:
           DEEPSEEK_TOKEN_1: ${{ secrets.DEEPSEEK_TOKEN }}
           DEEPSEEK_COOKIES_1: ${{ secrets.DEEPSEEK_COOKIES }}
-          ALLOW_UNAUTHENTICATED_API: "true"
-          LOG_FORMAT: "text"
-          HOST: "127.0.0.1"
-          PORT: "8080"
         run: |
-          cd deepseek-web2api
-          python server.py > /tmp/ds2api.log 2>&1 &
+          python start_deepseek_proxy.py -c config.ini > /tmp/ds2api.log 2>&1 &
           echo $! > /tmp/ds2api.pid
-          cd ..
 
       - name: 等待 DeepSeek 代理就绪
         run: |
