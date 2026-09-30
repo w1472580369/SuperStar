@@ -68,7 +68,7 @@ def parse_args():
         "-s", "--speed", type=float, default=1.0, help="视频播放倍速 (默认1, 最大2)"
     )
     parser.add_argument(
-        "-j", "--jobs", type=int, default=4, help="同时进行的章节数 (默认4, 如果一个章节有多个任务点，不会限制同时处理任务点的数量)"
+        "-j", "--jobs", type=int, default=1, help="同时进行的章节数 (默认1=串行刷课, 降低被判定多设备并发刷课的风险; 如需加速可调大)"
     )
 
     parser.add_argument(
@@ -300,7 +300,7 @@ class JobProcessor:
 
     def __init__(self, chaoxing: Chaoxing, course: dict[str, Any], tasks: list[ChapterTask], config: dict[str, Any]):
         if "jobs" not in config or not config["jobs"]:
-            config["jobs"] = 4
+            config["jobs"] = 1
         
         self.chaoxing = chaoxing
         self.course = course
@@ -437,8 +437,9 @@ def process_chapter(chaoxing: Chaoxing, course:dict[str, Any], point:dict[str, A
         pass
 
     # TODO: 个别章节很恶心，多到5个点，可以并行处理，将来会让不同课程不同章节的所有任务点共享一个队列，从而实现全局并行
+    # 章节内任务点串行处理: 同一章节只有一个视频/任务在上报进度, 避免被判定多设备并发刷课
     job_results:list[StudyResult]=[]
-    with ThreadPoolExecutor(max_workers=5) as executor:
+    with ThreadPoolExecutor(max_workers=1) as executor:
         for result in executor.map(lambda job: process_job(chaoxing, course, job, job_info, speed), jobs):
             job_results.append(result)
     

@@ -397,7 +397,7 @@ class Chaoxing:
             _duration,
             _playingTime,
             _type: str = "Video",
-            _isdrag: int = 3,
+            _isdrag: int = 0,
             headers: Optional[dict] = None,
     ) -> tuple[bool, int]:
 
@@ -583,8 +583,8 @@ class Chaoxing:
         forbidden_retry = 0
         max_forbidden_retry = 2
 
-        passed, state = self.video_progress_log(_session, _course, _job, _job_info, _dtoken, duration, duration,
-                                                _type, headers=headers, _isdrag=4)
+        passed, state = self.video_progress_log(_session, _course, _job, _job_info, _dtoken, duration, int(play_time),
+                                                _type, headers=headers)
         if passed:
             logger.info("任务瞬间完成: {}", _job['name'])
             return StudyResult.SUCCESS
