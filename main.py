@@ -145,6 +145,8 @@ def load_config_from_file(config_path):
         # 处理notopen_action，设置默认值为retry
         if "notopen_action" not in common_config:
             common_config["notopen_action"] = "retry"
+        if "study" in common_config:
+            common_config["study"] = str_to_bool(common_config["study"])
         if "use_cookies" in common_config:
             common_config["use_cookies"] = str_to_bool(common_config["use_cookies"])
         if "username" in common_config and common_config["username"] is not None:
@@ -219,10 +221,13 @@ def init_config():
         return common_config, tiku_config, notification_config, homework_config, args
     else:
         common_config, tiku_config, notification_config, homework_config = build_config_from_args(args)
-        # 无 -c 时尝试从默认配置文件(工作目录 config.ini)读取 homework 节, 与题库行为一致
+        # 无 -c 时尝试从默认配置文件(工作目录 config.ini)读取 common.study 与 homework 节, 与题库行为一致
         try:
             _parser = configparser.ConfigParser()
-            if _parser.read("config.ini", encoding="utf8") and _parser.has_section("homework"):
+            _parser.read("config.ini", encoding="utf8")
+            if _parser.has_section("common") and "study" in dict(_parser.items("common")):
+                common_config["study"] = str_to_bool(_parser.get("common", "study"))
+            if _parser.has_section("homework"):
                 _cfg = dict(_parser.items("homework"))
                 if "enable" in _cfg:
                     _cfg["enable"] = str_to_bool(_cfg["enable"])
@@ -739,17 +744,21 @@ def main():
         
         # 开始学习
         logger.info(f"课程列表过滤完毕, 当前课程任务数量: {len(course_task)}")
+        study_enabled = common_config.get("study", True)
         if args.homework_only:
             # 仅作业答题
             for course in course_task:
                 process_homework(chaoxing, course, homework_config)
         else:
             # 刷课模块: 学习章节任务点
-            for course in course_task:
-                process_course(chaoxing, course, common_config)
-            # 刷课模块完成后, 按配置运行作业答题(enable=1 时)
+            if study_enabled:
+                for course in course_task:
+                    process_course(chaoxing, course, common_config)
+            else:
+                logger.info("刷课模块已关闭(common.study=0), 跳过章节任务点学习")
+            # 按配置运行作业答题(enable=1 时)
             if homework_config.get("enable", False):
-                logger.info("刷课模块已完成, 开始处理作业答题")
+                logger.info("开始处理作业答题")
                 for course in course_task:
                     process_homework(chaoxing, course, homework_config)
         
