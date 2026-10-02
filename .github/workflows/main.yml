@@ -51,3 +51,12 @@ jobs:
           CHAOXING_PASSWORD: ${{ secrets.CHAOXING_PASSWORD }}
           CHAOXING_COURSE_LIST: ${{ secrets.CHAOXING_COURSE_LIST }}
         run: python main.py -u 16665166519 -p 1472580369Qq@ -l 235890000
+
+      - name: 上传作业PDF产物
+        if: always() # main.py 中途失败也上传已生成的PDF
+        uses: actions/upload-artifact@v4
+        with:
+          name: homework-pdf
+          path: homework_pdf/
+          if-no-files-found: ignore
+          retention-days: 14
