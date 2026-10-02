@@ -32,29 +32,55 @@ class HomeworkError(Exception):
 
 def _get_stu_encs(course: dict) -> dict:
     """
-    获取 stu(studentcourse) 页面中的 workEnc 与 stuEnc(#enc)。
+    获取课程页面中的 workEnc 与 stuEnc(#enc)。
 
-    作业列表接口需要这两个加密参数, 均来自课程学习页(studentcourse)。
+    作业列表接口需要这两个加密参数。新版学习通把它们放在课程首页
+    (mycourse/stu), 旧版放在章节页(studentcourse)。进入课程页面需要
+    课程加密参数 enc, 该值来自课程列表卡片 info 属性或课程链接的 enc 参数。
     """
     _session = SessionManager.get_session()
-    _url = (
+    course_enc = course.get("enc") or course.get("info") or ""
+
+    # 依次尝试课程首页/章节页(带 enc) -> 章节页(不带 enc, 兼容旧版)
+    candidates = []
+    if course_enc:
+        candidates.append(
+            f"https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/stu?"
+            f"courseid={course['courseId']}&clazzid={course['clazzId']}"
+            f"&cpi={course['cpi']}&enc={course_enc}"
+            f"&t={get_timestamp()}&pageHeader=8&v=2&hideHead=0"
+        )
+        _openc = course.get("openc", "")
+        candidates.append(
+            f"https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/studentcourse?"
+            f"courseid={course['courseId']}&clazzid={course['clazzId']}"
+            f"&cpi={course['cpi']}&enc={course_enc}&openc={_openc}&fromMiddle=1"
+        )
+    else:
+        logger.warning("课程缺少 enc(info) 参数, 仅尝试旧版章节页(studentcourse)")
+    candidates.append(
         f"https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/studentcourse?"
         f"courseid={course['courseId']}&clazzid={course['clazzId']}"
         f"&cpi={course['cpi']}&ut=s"
     )
-    logger.trace("URL: " + _url)
-    _resp = _session.get(_url)
-    if _resp.status_code != 200:
-        logger.error(f"获取课程作业加密参数失败 -> [{_resp.status_code}]{_resp.text[:200]}")
-        raise HomeworkError("获取课程作业加密参数失败")
 
-    work_enc = _extract_hidden(_resp.text, "id", "workEnc")
-    stu_enc = _extract_hidden(_resp.text, "id", "enc")
-    if not work_enc or not stu_enc:
-        logger.error("studentcourse 页面缺少 workEnc/stuEnc 参数")
-        raise HomeworkError("studentcourse 页面缺少 workEnc/stuEnc 参数")
-    logger.trace(f"workEnc={work_enc} stuEnc={stu_enc}")
-    return {"workEnc": work_enc, "stuEnc": stu_enc}
+    last_status = None
+    for _url in candidates:
+        logger.trace("URL: " + _url)
+        _resp = _session.get(_url)
+        last_status = _resp.status_code
+        if _resp.status_code != 200:
+            logger.warning(f"获取课程页面失败 -> [{_resp.status_code}]{_resp.text[:200]}")
+            continue
+        work_enc = _extract_hidden(_resp.text, "id", "workEnc")
+        stu_enc = _extract_hidden(_resp.text, "id", "enc")
+        if work_enc and stu_enc:
+            logger.trace(f"workEnc={work_enc} stuEnc={stu_enc}")
+            return {"workEnc": work_enc, "stuEnc": stu_enc}
+        logger.warning("课程页面未解析到 workEnc/stuEnc, 尝试下一个地址")
+
+    logger.error(f"获取课程作业加密参数失败(最后状态码 {last_status})")
+    raise HomeworkError("获取课程作业加密参数失败")
 
 
 def _extract_hidden(html_text: str, id_or_name: str, key: str) -> str:
@@ -84,10 +110,10 @@ def get_homework_list(course: dict, status: int = 1) -> list[dict]:
     """
     encs = _get_stu_encs(course)
     _session = SessionManager.get_session()
-    _url = "https://mooc1.chaoxing.com/mooc-ans/mooc2/work/list"
+    _url = "https://mooc1.chaoxing.com/mooc2/work/list"
     params = {
-        "courseid": course["courseId"],
-        "clazzid": course["clazzId"],
+        "courseId": course["courseId"],
+        "classId": course["clazzId"],
         "cpi": course["cpi"],
         "ut": "s",
         "t": get_timestamp(),
@@ -136,6 +162,38 @@ def _parse_homework_list(html_text: str) -> list[dict]:
     return works
 
 
+def _is_homework_form(html_text: str) -> bool:
+    """判断页面是否为作业答题页(含题目表单)"""
+    return ("singleQuesId" in html_text) or ("addStudentWorkNewWeb" in html_text)
+
+
+def _extract_dowork_url(html_text: str, work: dict) -> str:
+    """
+    从 task 跳转页中提取真正的答题页(dowork)地址。
+
+    兼容 iframe / meta refresh / JS 跳转三种写法。
+    """
+    patterns = (
+        r'(?:src|href)\s*=\s*["\']([^"\']*/mooc2/work/dowork[^"\']*)["\']',
+        r'["\'](https?://[^"\']*/mooc2/work/dowork[^"\']*)["\']',
+        r'(/mooc-ans/mooc2/work/dowork\?[^"\'\s<>\\]*)',
+    )
+    for pattern in patterns:
+        m = re.search(pattern, html_text, re.IGNORECASE)
+        if m:
+            return m.group(1).replace("&amp;", "&")
+
+    # 兜底: 依据列表项参数自行拼接 dowork 地址
+    if work.get("workId"):
+        return (
+            "https://mooc1.chaoxing.com/mooc-ans/mooc2/work/dowork?"
+            f"courseId={work.get('courseId', '')}&classId={work.get('classId', '')}"
+            f"&cpi={work.get('cpi', '')}&workId={work.get('workId', '')}"
+            f"&answerId={work.get('answerId', '')}&enc={work.get('enc', '')}"
+        )
+    return ""
+
+
 def get_homework_detail(work: dict) -> dict:
     """获取作业详情页(题目页), 并解析表单与题目"""
     _session = SessionManager.get_session()
@@ -145,6 +203,16 @@ def get_homework_detail(work: dict) -> dict:
     if _resp.status_code != 200:
         logger.error(f"获取作业详情失败 -> [{_resp.status_code}]{_resp.text[:200]}")
         raise HomeworkError("获取作业详情失败")
+
+    # task 页面可能只是跳转页, 真正题目在 dowork 页面
+    if not _is_homework_form(_resp.text):
+        _dowork_url = _extract_dowork_url(_resp.text, work)
+        if _dowork_url:
+            logger.trace("URL: " + _dowork_url)
+            _resp = _session.get(_dowork_url)
+            if _resp.status_code != 200:
+                logger.error(f"获取作业答题页失败 -> [{_resp.status_code}]{_resp.text[:200]}")
+                raise HomeworkError("获取作业答题页失败")
 
     return decode_homework_form(_resp.text)
 

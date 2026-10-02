@@ -35,13 +35,19 @@ def decode_course_list(html_text: str) -> List[Dict[str, str]]:
         if course.select_one("a.not-open-tip") or course.select_one("div.not-open-tip"):
             continue
         
+        _href = course.select_one("a").attrs["href"]
+        _encs = re.findall(r"[?&]enc=([^&]+)", _href)
+        _opencs = re.findall(r"[?&]openc=([^&]+)", _href)
         course_detail = {
             "id": course.attrs["id"],
             "info": course.attrs["info"],
             "roleid": course.attrs["roleid"],
             "clazzId": course.select_one("input.clazzId").attrs["value"],
             "courseId": course.select_one("input.courseId").attrs["value"],
-            "cpi": re.findall(r"cpi=(.*?)&", course.select_one("a").attrs["href"])[0],
+            "cpi": re.findall(r"cpi=(.*?)&", _href)[0],
+            # 课程加密参数(enc 来自课程卡片 info 属性, 或课程链接中的 enc 参数)
+            "enc": _encs[0] if _encs else course.attrs.get("info", ""),
+            "openc": _opencs[0] if _opencs else "",
             "title": course.select_one("span.course-name").attrs["title"],
             "desc": course.select_one("p.margint10").attrs["title"] if course.select_one("p.margint10") else "",
             "teacher": course.select_one("p.color3").attrs["title"]
