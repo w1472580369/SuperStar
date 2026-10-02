@@ -45,6 +45,8 @@ def decode_course_list(html_text: str) -> List[Dict[str, str]]:
             "clazzId": course.select_one("input.clazzId").attrs["value"],
             "courseId": course.select_one("input.courseId").attrs["value"],
             "cpi": re.findall(r"cpi=(.*?)&", _href)[0],
+            # 进入课程的完整链接(与浏览器点击一致, 用于后续跟随重定向取 workEnc/stuEnc)
+            "url": _href,
             # 课程加密参数(enc 来自课程卡片 info 属性, 或课程链接中的 enc 参数)
             "enc": _encs[0] if _encs else course.attrs.get("info", ""),
             "openc": _opencs[0] if _opencs else "",

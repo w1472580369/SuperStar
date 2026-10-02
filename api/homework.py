@@ -37,7 +37,8 @@ def _get_stu_encs(course: dict) -> dict:
     作业列表接口需要这两个加密参数。新版学习通把 workEnc 放在课程首页
     (mycourse/stu), 进入 stu 页需要课程加密参数 enc(=stuEnc)。
     注意: 课程卡片 info/href 里的 enc 可能是 clazzId_cpi 之类的复合串,
-    不能直接用, 需先从可访问的课程页(如 studentcourse)提取真实 enc。
+    不能直接用。优先 GET 课程完整链接(浏览器点击, 跟随重定向), 从最终页
+    提取 workEnc/stuEnc; 若不行再从 studentcourse 提取真实 enc 访问 stu。
     """
     _session = SessionManager.get_session()
     course_enc = course.get("enc") or course.get("info") or ""
@@ -69,8 +70,15 @@ def _get_stu_encs(course: dict) -> dict:
                 logger.info(f"从课程页提取到 enc={course_enc}")
                 break
 
-    # 2) 依次尝试各类课程页面, 直至解析到 workEnc/stuEnc
+    # 2) 依次尝试: 课程完整链接 -> stu(带 enc) -> stu(不带 enc) -> studentcourse(不带 enc)
     candidates = []
+    _href = course.get("url")
+    if _href:
+        if _href.startswith("//"):
+            _href = "https:" + _href
+        elif _href.startswith("/"):
+            _href = "https://mooc2-ans.chaoxing.com" + _href
+        candidates.append(_href)
     if course_enc:
         candidates.append(
             f"https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/stu?"
@@ -96,7 +104,9 @@ def _get_stu_encs(course: dict) -> dict:
         _resp = _session.get(_url, headers=_stu_headers)
         last_status = _resp.status_code
         if _resp.status_code != 200:
-            logger.warning(f"获取课程页面失败 -> [{_resp.status_code}]{_resp.text[:200]}")
+            logger.warning(
+                f"获取课程页面失败 -> [{_resp.status_code}] 最终URL={_resp.url} 响应片段: {_resp.text[:400]}"
+            )
             continue
         work_enc = _extract_hidden(_resp.text, "id", "workEnc")
         stu_enc = _extract_hidden(_resp.text, "id", "enc") or _extract_hidden(_resp.text, "name", "enc")
@@ -106,7 +116,8 @@ def _get_stu_encs(course: dict) -> dict:
         has_enc_tag = ('id="enc"' in _resp.text) or ('name="enc"' in _resp.text)
         logger.warning(
             f"课程页面未解析到 workEnc/stuEnc(页面长度 {len(_resp.text)}, "
-            f"含enc标记 {has_enc_tag}, 含workEnc标记 {'workEnc' in _resp.text}), 尝试下一个地址"
+            f"最终URL={_resp.url}, 含enc标记 {has_enc_tag}, 含workEnc标记 {'workEnc' in _resp.text}), "
+            f"响应片段: {_resp.text[:400]}"
         )
 
     logger.error(f"获取课程作业加密参数失败(最后状态码 {last_status})")
