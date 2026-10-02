@@ -293,15 +293,29 @@ def solve_homework(tiku: Tiku, form: dict, query_delay: float = 0.0) -> tuple[in
     """
     对作业题目逐题搜题并填写答案。
 
+    已作答的题目(existing_answer 非空, 如之前保存/提交过)保留原答案并跳过搜题;
+    仅对空题搜题补填。
+
     Returns:
-        (找到答案的题目数, 总题数)
+        (已作答/找到答案的题目数, 总题数)
     """
     questions = form.get("questions", [])
     total_questions = len(questions)
     found_answers = 0
+    skipped_answered = 0
 
     for q in questions:
         logger.debug(f"当前题目信息 -> {q}")
+
+        # 已作答: 保留原答案, 跳过搜题
+        existing_answer = q.get("existing_answer", "")
+        if existing_answer:
+            skipped_answered += 1
+            found_answers += 1
+            q["answerField"][f"answer{q['id']}"] = existing_answer
+            logger.info(f'题目已作答, 跳过搜题 -> 保留答案 "{existing_answer}"')
+            continue
+
         if query_delay > 0:
             time.sleep(query_delay)
 
@@ -331,6 +345,7 @@ def solve_homework(tiku: Tiku, form: dict, query_delay: float = 0.0) -> tuple[in
         q["answerField"][f"answer{q['id']}"] = answer
         logger.info(f'{q["title"]} 填写答案为 {answer or "(空)"}')
 
+    logger.info(f"作业搜题完成: 已作答跳过 {skipped_answered} 题, 新搜题 {total_questions - skipped_answered} 题")
     return found_answers, total_questions
 
 
