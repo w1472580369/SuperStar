@@ -40,8 +40,17 @@ def _get_stu_encs(course: dict) -> dict:
     """
     _session = SessionManager.get_session()
     course_enc = course.get("enc") or course.get("info") or ""
+    _openc = course.get("openc", "")
 
-    # 依次尝试课程首页/章节页(带 enc) -> 章节页(不带 enc, 兼容旧版)
+    # 与浏览器抓包一致, 带上 Referer 等导航请求头, 否则超星可能返回不含表单的页面
+    _stu_headers = {
+        "Referer": "https://mooc2-ans.chaoxing.com/mooc2-ans/visit/interaction"
+                   "?moocDomain=https://mooc1-1.chaoxing.com/mooc-ans",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Upgrade-Insecure-Requests": "1",
+    }
+
+    # 依次尝试各类课程页面, 直至解析到 workEnc/stuEnc
     candidates = []
     if course_enc:
         candidates.append(
@@ -50,14 +59,19 @@ def _get_stu_encs(course: dict) -> dict:
             f"&cpi={course['cpi']}&enc={course_enc}"
             f"&t={get_timestamp()}&pageHeader=8&v=2&hideHead=0"
         )
-        _openc = course.get("openc", "")
-        candidates.append(
-            f"https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/studentcourse?"
-            f"courseid={course['courseId']}&clazzid={course['clazzId']}"
-            f"&cpi={course['cpi']}&enc={course_enc}&openc={_openc}&fromMiddle=1"
-        )
+        if _openc:
+            candidates.append(
+                f"https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/studentcourse?"
+                f"courseid={course['courseId']}&clazzid={course['clazzId']}"
+                f"&cpi={course['cpi']}&enc={course_enc}&openc={_openc}&fromMiddle=1"
+            )
     else:
-        logger.warning("课程缺少 enc(info) 参数, 仅尝试旧版章节页(studentcourse)")
+        logger.warning("课程缺少 enc(info) 参数, 将尝试不带 enc 的地址")
+    candidates.append(
+        f"https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/stu?"
+        f"courseid={course['courseId']}&clazzid={course['clazzId']}"
+        f"&cpi={course['cpi']}&t={get_timestamp()}&pageHeader=8&v=2&hideHead=0"
+    )
     candidates.append(
         f"https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/studentcourse?"
         f"courseid={course['courseId']}&clazzid={course['clazzId']}"
@@ -66,8 +80,9 @@ def _get_stu_encs(course: dict) -> dict:
 
     last_status = None
     for _url in candidates:
-        logger.trace("URL: " + _url)
-        _resp = _session.get(_url)
+        logger.info(f"尝试获取课程作业加密参数 -> course={course['courseId']} enc={course_enc or '(空)'}")
+        logger.info("URL: " + _url)
+        _resp = _session.get(_url, headers=_stu_headers)
         last_status = _resp.status_code
         if _resp.status_code != 200:
             logger.warning(f"获取课程页面失败 -> [{_resp.status_code}]{_resp.text[:200]}")
@@ -75,21 +90,40 @@ def _get_stu_encs(course: dict) -> dict:
         work_enc = _extract_hidden(_resp.text, "id", "workEnc")
         stu_enc = _extract_hidden(_resp.text, "id", "enc")
         if work_enc and stu_enc:
-            logger.trace(f"workEnc={work_enc} stuEnc={stu_enc}")
+            logger.info(f"workEnc={work_enc} stuEnc={stu_enc}")
             return {"workEnc": work_enc, "stuEnc": stu_enc}
-        logger.warning("课程页面未解析到 workEnc/stuEnc, 尝试下一个地址")
+        has_enc_tag = ('id="enc"' in _resp.text) or ('name="enc"' in _resp.text)
+        logger.warning(
+            f"课程页面未解析到 workEnc/stuEnc(页面长度 {len(_resp.text)}, "
+            f"含enc标记 {has_enc_tag}, 含workEnc标记 {'workEnc' in _resp.text}), 尝试下一个地址"
+        )
 
     logger.error(f"获取课程作业加密参数失败(最后状态码 {last_status})")
     raise HomeworkError("获取课程作业加密参数失败")
 
 
 def _extract_hidden(html_text: str, id_or_name: str, key: str) -> str:
-    """从 HTML 中提取 hidden input 的 value"""
+    """从 HTML 中提取 hidden input 的 value(兼容 id/name 精确匹配, 不限定 type=hidden)"""
+    # 1) 精确匹配 id="{key}"
     m = re.search(
-        rf'<input\b[^>]*?(?:type\s*=\s*["\']hidden["\'])[^>]*?\b{key}\b[^>]*?>',
+        rf'<input\b[^>]*?\bid\s*=\s*["\']{re.escape(key)}["\'][^>]*?>',
         html_text,
         re.IGNORECASE,
     )
+    # 2) 精确匹配 name="{key}"
+    if not m:
+        m = re.search(
+            rf'<input\b[^>]*?\bname\s*=\s*["\']{re.escape(key)}["\'][^>]*?>',
+            html_text,
+            re.IGNORECASE,
+        )
+    # 3) 兼容 type=hidden 与 key 任一顺序
+    if not m:
+        m = re.search(
+            rf'<input\b[^>]*?(?:type\s*=\s*["\']hidden["\'])[^>]*?\b{key}\b[^>]*?>',
+            html_text,
+            re.IGNORECASE,
+        )
     if not m:
         m = re.search(
             rf'<input\b[^>]*?\b{key}\b[^>]*?(?:type\s*=\s*["\']hidden["\'])[^>]*?>',
@@ -111,6 +145,16 @@ def get_homework_list(course: dict, status: int = 1) -> list[dict]:
     encs = _get_stu_encs(course)
     _session = SessionManager.get_session()
     _url = "https://mooc1.chaoxing.com/mooc2/work/list"
+    _headers = {
+        "Referer": (
+            "https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/stu?"
+            f"courseid={course['courseId']}&clazzid={course['clazzId']}"
+            f"&cpi={course['cpi']}&enc={encs['stuEnc']}"
+            f"&t={get_timestamp()}&pageHeader=8&v=2&hideHead=0"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Upgrade-Insecure-Requests": "1",
+    }
     params = {
         "courseId": course["courseId"],
         "classId": course["clazzId"],
@@ -122,7 +166,7 @@ def get_homework_list(course: dict, status: int = 1) -> list[dict]:
         "status": status,
     }
     logger.trace("URL: " + _url)
-    _resp = _session.get(_url, params=params)
+    _resp = _session.get(_url, params=params, headers=_headers)
     if _resp.status_code != 200:
         logger.error(f"获取作业列表失败 -> [{_resp.status_code}]{_resp.text[:200]}")
         raise HomeworkError("获取作业列表失败")
@@ -198,8 +242,14 @@ def get_homework_detail(work: dict) -> dict:
     """获取作业详情页(题目页), 并解析表单与题目"""
     _session = SessionManager.get_session()
     _url = work["url"]
+    _referer = "https://mooc1.chaoxing.com/mooc2/work/list"
+    _headers = {
+        "Referer": _referer,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Upgrade-Insecure-Requests": "1",
+    }
     logger.trace("URL: " + _url)
-    _resp = _session.get(_url)
+    _resp = _session.get(_url, headers=_headers)
     if _resp.status_code != 200:
         logger.error(f"获取作业详情失败 -> [{_resp.status_code}]{_resp.text[:200]}")
         raise HomeworkError("获取作业详情失败")
@@ -209,7 +259,7 @@ def get_homework_detail(work: dict) -> dict:
         _dowork_url = _extract_dowork_url(_resp.text, work)
         if _dowork_url:
             logger.trace("URL: " + _dowork_url)
-            _resp = _session.get(_dowork_url)
+            _resp = _session.get(_dowork_url, headers=_headers)
             if _resp.status_code != 200:
                 logger.error(f"获取作业答题页失败 -> [{_resp.status_code}]{_resp.text[:200]}")
                 raise HomeworkError("获取作业答题页失败")
