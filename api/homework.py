@@ -34,13 +34,18 @@ def _get_stu_encs(course: dict) -> dict:
     """
     获取课程页面中的 workEnc 与 stuEnc(#enc)。
 
-    作业列表接口需要这两个加密参数。新版学习通把它们放在课程首页
-    (mycourse/stu), 旧版放在章节页(studentcourse)。进入课程页面需要
-    课程加密参数 enc, 该值来自课程列表卡片 info 属性或课程链接的 enc 参数。
+    作业列表接口需要这两个加密参数。新版学习通把 workEnc 放在课程首页
+    (mycourse/stu), 进入 stu 页需要课程加密参数 enc(=stuEnc)。
+    注意: 课程卡片 info/href 里的 enc 可能是 clazzId_cpi 之类的复合串,
+    不能直接用, 需先从可访问的课程页(如 studentcourse)提取真实 enc。
     """
     _session = SessionManager.get_session()
     course_enc = course.get("enc") or course.get("info") or ""
     _openc = course.get("openc", "")
+    _base = (
+        f"courseid={course['courseId']}&clazzid={course['clazzId']}"
+        f"&cpi={course['cpi']}"
+    )
 
     # 与浏览器抓包一致, 带上 Referer 等导航请求头, 否则超星可能返回不含表单的页面
     _stu_headers = {
@@ -50,32 +55,38 @@ def _get_stu_encs(course: dict) -> dict:
         "Upgrade-Insecure-Requests": "1",
     }
 
-    # 依次尝试各类课程页面, 直至解析到 workEnc/stuEnc
+    # 1) 课程卡片 enc 可能是无效复合串, 先从可访问的课程页提取真实 enc(=stuEnc)
+    if not course_enc or "_" in course_enc:
+        logger.info(f"课程卡片 enc 不可用({course_enc or '空'}), 尝试从课程页提取真实 enc")
+        for _url in (
+            f"https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/studentcourse?{_base}&ut=s",
+            f"https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/studentcourse?{_base}",
+        ):
+            _resp = _session.get(_url, headers=_stu_headers)
+            _enc = _extract_hidden(_resp.text, "id", "enc") or _extract_hidden(_resp.text, "name", "enc")
+            if _enc:
+                course_enc = _enc
+                logger.info(f"从课程页提取到 enc={course_enc}")
+                break
+
+    # 2) 依次尝试各类课程页面, 直至解析到 workEnc/stuEnc
     candidates = []
     if course_enc:
         candidates.append(
             f"https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/stu?"
-            f"courseid={course['courseId']}&clazzid={course['clazzId']}"
-            f"&cpi={course['cpi']}&enc={course_enc}"
-            f"&t={get_timestamp()}&pageHeader=8&v=2&hideHead=0"
+            f"{_base}&enc={course_enc}&t={get_timestamp()}&pageHeader=8&v=2&hideHead=0"
         )
         if _openc:
             candidates.append(
                 f"https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/studentcourse?"
-                f"courseid={course['courseId']}&clazzid={course['clazzId']}"
-                f"&cpi={course['cpi']}&enc={course_enc}&openc={_openc}&fromMiddle=1"
+                f"{_base}&enc={course_enc}&openc={_openc}&fromMiddle=1"
             )
-    else:
-        logger.warning("课程缺少 enc(info) 参数, 将尝试不带 enc 的地址")
     candidates.append(
         f"https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/stu?"
-        f"courseid={course['courseId']}&clazzid={course['clazzId']}"
-        f"&cpi={course['cpi']}&t={get_timestamp()}&pageHeader=8&v=2&hideHead=0"
+        f"{_base}&t={get_timestamp()}&pageHeader=8&v=2&hideHead=0"
     )
     candidates.append(
-        f"https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/studentcourse?"
-        f"courseid={course['courseId']}&clazzid={course['clazzId']}"
-        f"&cpi={course['cpi']}&ut=s"
+        f"https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/studentcourse?{_base}&ut=s"
     )
 
     last_status = None
@@ -88,7 +99,7 @@ def _get_stu_encs(course: dict) -> dict:
             logger.warning(f"获取课程页面失败 -> [{_resp.status_code}]{_resp.text[:200]}")
             continue
         work_enc = _extract_hidden(_resp.text, "id", "workEnc")
-        stu_enc = _extract_hidden(_resp.text, "id", "enc")
+        stu_enc = _extract_hidden(_resp.text, "id", "enc") or _extract_hidden(_resp.text, "name", "enc")
         if work_enc and stu_enc:
             logger.info(f"workEnc={work_enc} stuEnc={stu_enc}")
             return {"workEnc": work_enc, "stuEnc": stu_enc}
