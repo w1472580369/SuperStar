@@ -6,7 +6,10 @@ on:
   #是否开始每天8点定时刷课，若要开启请把下面两行注释去掉
   #schedule:
   #  - cron: "0 8 * * *" 
-    
+
+permissions:
+  contents: write
+
 jobs: 
   Start:
     runs-on: ubuntu-latest # 在最新版本的 Ubuntu 操作系统环境下运行
@@ -52,11 +55,16 @@ jobs:
           CHAOXING_COURSE_LIST: ${{ secrets.CHAOXING_COURSE_LIST }}
         run: python main.py -u 16665166519 -p 1472580369Qq@ -l 235890000
 
-      - name: 上传作业PDF产物
-        if: always() # main.py 中途失败也上传已生成的PDF
-        uses: actions/upload-artifact@v4
-        with:
-          name: homework-pdf
-          path: homework_pdf/
-          if-no-files-found: ignore
-          retention-days: 14
+      - name: 提交作业PDF到仓库
+        if: always() # main.py 中途失败也提交已生成的PDF
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add homework_pdf/
+          if git diff --cached --quiet; then
+            echo "无新PDF, 跳过提交"
+            exit 0
+          fi
+          # [skip ci] 防止推送再次触发本 workflow 形成循环
+          git commit -m "docs: 更新作业PDF [skip ci]"
+          git push
